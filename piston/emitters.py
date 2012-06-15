@@ -170,8 +170,8 @@ class Emitter(object):
                 v = lambda f: getattr(data, f.attname)
 
                 if not fields and handler:
-                    fields = getattr(handler, 'fields')    
-                
+                    fields = getattr(handler, 'fields')
+
                 if not fields and hasattr(handler, 'fields'):
                     """
                     Fields was not specified, try to find teh correct
@@ -187,7 +187,7 @@ class Emitter(object):
                     if not get_fields:
                         get_fields = set([ f.attname.replace("_id", "", 1)
                             for f in data._meta.fields + data._meta.virtual_fields])
-                    
+
                     if hasattr(mapped, 'extra_fields'):
                         get_fields.update(mapped.extra_fields)
 
@@ -427,7 +427,7 @@ class YAMLEmitter(Emitter):
 
 if yaml:  # Only register yaml if it was import successfully.
     Emitter.register('yaml', YAMLEmitter, 'application/x-yaml; charset=utf-8')
-    Mimer.register(lambda s: dict(yaml.load(s)), ('application/x-yaml',))
+    Mimer.register(lambda s: dict(yaml.safe_load(s)), ('application/x-yaml',))
 
 class PickleEmitter(Emitter):
     """
