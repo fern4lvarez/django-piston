@@ -1,5 +1,5 @@
 # Django imports
-import python
+import django
 from django.core import mail
 from django.contrib.auth.models import User
 from django.conf import settings
