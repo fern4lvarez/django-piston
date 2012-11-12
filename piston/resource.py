@@ -83,8 +83,8 @@ class Resource(object):
             error_string = yaml.dump(e.serializable_errors)
         else:
             # Fallback to the previous behaviour for xml or yaml if yaml == None
-            error_string = str(e.form.errors)
-        resp.write(' ' + error_string)
+            error_string = (e.form.errors)
+        resp.write(u' ' + unicode(error_string))
         return resp
 
     @property
@@ -193,11 +193,13 @@ class Resource(object):
         # If we're looking at a response object which contains non-string
         # content, then assume we should use the emitter to format that
         # content
-        if isinstance(result, HttpResponse) and not result._is_string:
+        if self._use_emitter(result):
             status_code = result.status_code
-            # Note: We can't use result.content here because that method attempts
-            # to convert the content into a string which we don't want.
-            # when _is_string is False _container is the raw data
+            # Note: We can't use result.content here because that
+            # method attempts to convert the content into a string
+            # which we don't want.  when
+            # _is_string/_base_content_is_iter is False _container is
+            # the raw data
             result = result._container
 
         srl = emitter(result, typemapper, handler, fields, anonymous)
@@ -224,6 +226,16 @@ class Resource(object):
             return resp
         except HttpStatusCode, e:
             return e.response
+
+    @staticmethod
+    def _use_emitter(result):
+        """True iff result is a HttpResponse and contains non-string content."""
+        if not isinstance(result, HttpResponse):
+            return False
+        elif django.VERSION >= (1, 4):
+            return result._base_content_is_iter
+        else:
+            return not result._is_string
 
     @staticmethod
     def cleanup_request(request):
