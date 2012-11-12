@@ -1,17 +1,19 @@
-import sys
-import json
+import sys, inspect
 
-try:
-    import yaml
-except ImportError:
-    pass
-
-from django.http import HttpResponse, Http404, HttpResponseNotAllowed, HttpResponseServerError
+import django
+from django.http import (HttpResponse, Http404, HttpResponseNotAllowed,
+    HttpResponseForbidden, HttpResponseServerError)
 from django.views.debug import ExceptionReporter
 from django.views.decorators.vary import vary_on_headers
 from django.conf import settings
-from django.core.mail import EmailMessage
+from django.core.mail import send_mail, EmailMessage
 from django.db.models.query import QuerySet
+from django.http import Http404
+
+try:
+    import mimeparse
+except ImportError:
+    mimeparse = None
 
 from emitters import Emitter
 from handler import typemapper
@@ -22,7 +24,6 @@ from utils import rc, format_error, translate_mime, MimerDataException
 
 CHALLENGE = object()
 
-
 class Resource(object):
     """
     Resource. Create one for your URL mappings, just
@@ -31,12 +32,12 @@ class Resource(object):
     is an authentication handler. If not specified,
     `NoAuthentication` will be used by default.
     """
-    callmap = {'GET': 'read', 'POST': 'create',
-               'PUT': 'update', 'DELETE': 'delete'}
+    callmap = { 'GET': 'read', 'POST': 'create',
+                'PUT': 'update', 'DELETE': 'delete' }
 
     def __init__(self, handler, authentication=None):
         if not callable(handler):
-            raise AttributeError("Handler not callable.")
+            raise AttributeError, "Handler not callable."
 
         self.handler = handler()
         self.csrf_exempt = getattr(self.handler, 'csrf_exempt', True)
@@ -52,39 +53,44 @@ class Resource(object):
         self.email_errors = getattr(settings, 'PISTON_EMAIL_ERRORS', True)
         self.display_errors = getattr(settings, 'PISTON_DISPLAY_ERRORS', True)
         self.stream = getattr(settings, 'PISTON_STREAM_OUTPUT', False)
+        # Emitter selection
+        self.strict_accept = getattr(settings, 'PISTON_STRICT_ACCEPT_HANDLING',
+                                     False)
+        self.default_emitter = getattr(settings, 'PISTON_DEFAULT_EMITTER',
+                                       'json')
 
     def determine_emitter(self, request, *args, **kwargs):
         """
         Function for determening which emitter to use
         for output. It lives here so you can easily subclass
         `Resource` in order to change how emission is detected.
-
-        You could also check for the `Accept` HTTP header here,
-        since that pretty much makes sense. Refer to `Mimer` for
-        that as well.
         """
-        em = kwargs.pop('emitter_format', None)
+        try:
+            return kwargs['emitter_format']
+        except KeyError:
+            pass
+        if 'format' in request.GET:
+            return request.GET.get('format')
+        if mimeparse and 'HTTP_ACCEPT' in request.META:
+            supported_mime_types = set()
+            emitter_map = {}
+            for name, (klass, content_type) in Emitter.EMITTERS.items():
+                content_type_without_encoding = content_type.split(';')[0]
+                supported_mime_types.add(content_type_without_encoding)
+                emitter_map[content_type_without_encoding] = name
+            preferred_content_type = mimeparse.best_match(
+                list(supported_mime_types),
+                request.META['HTTP_ACCEPT'])
+            return emitter_map.get(preferred_content_type, None)
 
-        if not em:
-            em = request.GET.get('format', 'json')
-
-        return em
-
-    def form_validation_response(self, e, em_format):
+    def form_validation_response(self, e):
         """
-        Method to return form validation error information.
+        Method to return form validation error information. 
         You will probably want to override this in your own
         `Resource` subclass.
         """
         resp = rc.BAD_REQUEST
-        if em_format == 'json':
-            error_string = json.dumps(e.serializable_errors)
-        elif em_format == 'yaml' and yaml:
-            error_string = yaml.dump(e.serializable_errors)
-        else:
-            # Fallback to the previous behaviour for xml or yaml if yaml == None
-            error_string = str(e.form.errors)
-        resp.write(' ' + error_string)
+        resp.write(u' '+unicode(e.form.errors))
         return resp
 
     @property
@@ -162,8 +168,14 @@ class Resource(object):
         if not meth:
             raise Http404
 
-        # Support emitter both through (?P<emitter_format>) and ?format=emitter.
+        # Support emitter through (?P<emitter_format>) and ?format=emitter
+        # and lastly Accept: header processing
         em_format = self.determine_emitter(request, *args, **kwargs)
+        if not em_format:
+            request_has_accept = 'HTTP_ACCEPT' in request.META
+            if request_has_accept and self.strict_accept:
+                return rc.NOT_ACCEPTABLE
+            em_format = self.default_emitter
 
         kwargs.pop('emitter_format', None)
 
@@ -191,13 +203,15 @@ class Resource(object):
         status_code = 200
 
         # If we're looking at a response object which contains non-string
-        # content, then assume we should use the emitter to format that
+        # content, then assume we should use the emitter to format that 
         # content
-        if isinstance(result, HttpResponse) and not result._is_string:
+        if self._use_emitter(result):
             status_code = result.status_code
-            # Note: We can't use result.content here because that method attempts
-            # to convert the content into a string which we don't want.
-            # when _is_string is False _container is the raw data
+            # Note: We can't use result.content here because that
+            # method attempts to convert the content into a string
+            # which we don't want.  when
+            # _is_string/_base_content_is_iter is False _container is
+            # the raw data
             result = result._container
 
         srl = emitter(result, typemapper, handler, fields, anonymous)
@@ -209,10 +223,8 @@ class Resource(object):
             before sending it to the client. Won't matter for
             smaller datasets, but larger will have an impact.
             """
-            if self.stream:
-                stream = srl.stream_render(request)
-            else:
-                stream = srl.render(request)
+            if self.stream: stream = srl.stream_render(request)
+            else: stream = srl.render(request)
 
             if not isinstance(stream, HttpResponse):
                 resp = HttpResponse(stream, mimetype=ct, status=status_code)
@@ -226,15 +238,25 @@ class Resource(object):
             return e.response
 
     @staticmethod
+    def _use_emitter(result):
+        """True iff result is a HttpResponse and contains non-string content."""
+        if not isinstance(result, HttpResponse):
+            return False
+        elif django.VERSION >= (1, 4):
+            return result._base_content_is_iter
+        else:
+            return not result._is_string
+
+    @staticmethod
     def cleanup_request(request):
         """
         Removes `oauth_` keys from various dicts on the
         request object, and returns the sanitized version.
         """
         for method_type in ('GET', 'PUT', 'POST', 'DELETE'):
-            block = getattr(request, method_type, {})
+            block = getattr(request, method_type, { })
 
-            if True in [k.startswith("oauth_") for k in block.keys()]:
+            if True in [ k.startswith("oauth_") for k in block.keys() ]:
                 sanitized = block.copy()
 
                 for k in sanitized.keys():
@@ -251,38 +273,33 @@ class Resource(object):
         subject = "Piston crash report"
         html = reporter.get_traceback_html()
 
-        message = EmailMessage(settings.EMAIL_SUBJECT_PREFIX + subject,
+        message = EmailMessage(settings.EMAIL_SUBJECT_PREFIX+subject,
                                 html, settings.SERVER_EMAIL,
-                                [admin[1] for admin in settings.ADMINS])
+                                [ admin[1] for admin in settings.ADMINS ])
 
         message.content_subtype = 'html'
         message.send(fail_silently=True)
 
+
     def error_handler(self, e, request, meth, em_format):
         """
-        Override this method to add handling of errors customized for your
+        Override this method to add handling of errors customized for your 
         needs
         """
         if isinstance(e, FormValidationError):
-            return self.form_validation_response(e, self.determine_emitter(request))
+            return self.form_validation_response(e)
 
         elif isinstance(e, TypeError):
             result = rc.BAD_REQUEST
+            hm = HandlerMethod(meth)
+            sig = hm.signature
 
             msg = 'Method signature does not match.\n\n'
 
-            try:
-                hm = HandlerMethod(meth)
-                sig = hm.signature
-
-            except TypeError:
-                msg += 'Signature could not be determined'
-
+            if sig:
+                msg += 'Signature should be: %s' % sig
             else:
-                if sig:
-                    msg += 'Signature should be: %s' % sig
-                else:
-                    msg += 'Resource does not expect any parameters.'
+                msg += 'Resource does not expect any parameters.'
 
             if self.display_errors:
                 msg += '\n\nException was: %s' % str(e)
@@ -294,8 +311,8 @@ class Resource(object):
 
         elif isinstance(e, HttpStatusCode):
             return e.response
-
-        else:
+ 
+        else: 
             """
             On errors (like code errors), we'd like to be able to
             give crash reports to both admins and also the calling

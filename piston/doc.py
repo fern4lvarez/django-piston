@@ -179,21 +179,15 @@ def documentation_view(request):
     from the handlers you've defined.
     """
     docs = [ ]
-    tmp_docs = { }
 
-    for handler in handler_tracker:
-        if not handler.is_private:
-            doc = generate_doc(handler)
-            tmp_docs[doc.name] = doc
-        
-    for d in tmp_docs.itervalues():
-        docs.append(d)
+    for handler in handler_tracker: 
+        docs.append(generate_doc(handler))
 
-    def _compare(doc1, doc2):
-        #handlers and their anonymous counterparts are put next to each other.
-        name1 = doc1.name.replace("Anonymous", "")
-        name2 = doc2.name.replace("Anonymous", "")
-        return cmp(name1, name2)    
+    def _compare(doc1, doc2): 
+       #handlers and their anonymous counterparts are put next to each other.
+       name1 = doc1.name.replace("Anonymous", "")
+       name2 = doc2.name.replace("Anonymous", "")
+       return cmp(name1, name2)    
  
     docs.sort(_compare)
        
