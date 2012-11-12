@@ -6,7 +6,8 @@ try:
 except ImportError:
     pass
 
-from django.http import HttpResponse, Http404, HttpResponseNotAllowed, HttpResponseServerError
+import django
+from django.http import HttpResponse, Http404, HttpResponseNotAllowed, HttpResponseForbidden, HttpResponseServerError
 from django.views.debug import ExceptionReporter
 from django.views.decorators.vary import vary_on_headers
 from django.conf import settings
